@@ -67,8 +67,10 @@ jobs:
             bzip2
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(curl -fsSL https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("linux-x86_64")) | .browser_download_url')
+          ASSET_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("linux-x86_64")) | .browser_download_url')
           curl -fsSL -o cooker "$ASSET_URL"
           chmod +x cooker
           R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
@@ -208,8 +210,10 @@ jobs:
           echo "$(brew --prefix bzip2)/bin" >> $GITHUB_PATH
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(curl -fsSL https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("macos-arm64")) | .browser_download_url')
+          ASSET_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("macos-arm64")) | .browser_download_url')
           curl -fsSL -o cooker "$ASSET_URL"
           chmod +x cooker
           R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
@@ -335,8 +339,10 @@ jobs:
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/noatgnu/cookeR/releases/latest"
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/noatgnu/cookeR/releases/latest" -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
           $assetUrl = ($release.assets | Where-Object { $_.name -like "*windows-x86_64.exe" }).browser_download_url
           Invoke-WebRequest -Uri $assetUrl -OutFile cooker.exe
           $available = & .\cooker.exe r list --available --json | ConvertFrom-Json
