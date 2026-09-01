@@ -1,0 +1,457 @@
+name: Build and Publish Portable R/Python Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      cauldron_go_ref:
+        description: 'cauldron-go ref/tag to source requirements.txt/r_requirements.txt/install_packages.R from'
+        required: false
+        default: 'main'
+  schedule:
+    - cron: '0 6 1 * *'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=env-$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout cauldron-go requirements (canonical source, avoids drift)
+        uses: actions/checkout@v4
+        with:
+          repository: noatgnu/cauldron-go
+          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          sparse-checkout: |
+            scripts/requirements.txt
+            scripts/r_requirements.txt
+            backend/scripts/r/install_packages.R
+          sparse-checkout-cone-mode: false
+          path: cauldron-go-src
+
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xorg-dev \
+            gfortran \
+            libpng-dev \
+            libjpeg-dev \
+            liblzma-dev \
+            libpcre2-dev \
+            libcurl4-openssl-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrender-dev \
+            libxtst-dev \
+            libcairo2-dev \
+            tcl-dev \
+            tk-dev \
+            libhdf5-dev \
+            libblosc-dev \
+            libhiredis-dev \
+            libopenmpi-dev \
+            liblzo2-dev \
+            libomp-dev \
+            libreadline-dev \
+            bzip2
+
+      - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
+        run: |
+          ASSET_URL=$(curl -fsSL https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("linux-x86_64")) | .browser_download_url')
+          curl -fsSL -o cooker "$ASSET_URL"
+          chmod +x cooker
+          R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
+          mkdir -p "${{ github.workspace }}/bin/linux"
+          COOKER_INSTALL_DIR="${{ github.workspace }}/bin/linux" ./cooker r install "$R_VERSION"
+          mv "${{ github.workspace }}/bin/linux/$R_VERSION" "${{ github.workspace }}/bin/linux/R-Portable"
+
+      - name: Strip R binaries
+        run: |
+          find ${{ github.workspace }}/bin/linux/R-Portable -type f \( -name "*.so" -o -perm /111 \) -exec strip {} \;
+
+      - name: Clean up R installation
+        run: |
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/doc
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/tests
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/share/doc
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/share/info
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/share/man
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/doc
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/html
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/help
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/examples
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/demo
+          rm -rf ${{ github.workspace }}/bin/linux/R-Portable/library/*/tests
+
+      - name: Set up writable permissions for R library
+        run: |
+          chmod -R 777 ${{ github.workspace }}/bin/linux/R-Portable
+
+      - name: Set up R R_LIBS_USER
+        run: |
+          echo "R_LIBS_USER=${{ github.workspace }}/bin/linux/R-Portable/lib" >> $GITHUB_ENV
+
+      - name: Install R packages
+        env:
+          CPPFLAGS: -I/usr/include -I/usr/include/xorg
+          LDFLAGS: -L/usr/lib -L/usr/lib/xorg
+          CFLAGS: -I/usr/include
+          TCL_LIBRARY: /usr/lib/tcltk
+          TK_LIBRARY: /usr/lib/tcltk
+          PKG_CONFIG_PATH: /usr/lib/pkgconfig
+          C_INCLUDE_PATH: /usr/include
+          LIBRARY_PATH: /usr/lib
+          R_HOME: ${{ github.workspace }}/bin/linux/R-Portable
+        run: |
+          cd cauldron-go-src
+          ${{ github.workspace }}/bin/linux/R-Portable/bin/Rscript backend/scripts/r/install_packages.R
+
+      - name: Download Portable Python
+        run: |
+          curl -LO https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz
+
+      - name: Extract Python
+        run: |
+          tar -xzf cpython-3.11.10+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz -C bin/linux --no-same-owner --no-same-permissions
+
+      - name: Install Python Packages
+        env:
+          CPPFLAGS: -I/usr/include -I/usr/include/xorg
+          LDFLAGS: -L/usr/lib -L/usr/lib/xorg
+          CFLAGS: -I/usr/include
+          TCL_LIBRARY: /usr/lib/tcltk
+          TK_LIBRARY: /usr/lib/tcltk
+          PKG_CONFIG_PATH: /usr/lib/pkgconfig
+          C_INCLUDE_PATH: /usr/include
+          LIBRARY_PATH: /usr/lib
+          R_HOME: ${{ github.workspace }}/bin/linux/R-Portable
+        run: |
+          ${{ github.workspace }}/bin/linux/python/bin/python3 -m pip install --upgrade pip
+          ${{ github.workspace }}/bin/linux/python/bin/python3 -m pip install -r cauldron-go-src/scripts/requirements.txt
+
+      - name: Compress Python directory
+        run: XZ_OPT=-9 tar -cJf python-linux-x86_64.tar.xz bin/linux/python
+
+      - name: Generate Python checksum
+        run: sha256sum python-linux-x86_64.tar.xz > python-linux-x86_64.tar.xz.sha256
+
+      - name: Compress R-Portable directory
+        run: XZ_OPT=-9 tar -cJf r-portable-linux-x86_64.tar.xz bin/linux/R-Portable
+
+      - name: Generate R-Portable checksum
+        run: sha256sum r-portable-linux-x86_64.tar.xz > r-portable-linux-x86_64.tar.xz.sha256
+
+      - name: Upload Python Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-linux-x86_64
+          path: |
+            python-linux-x86_64.tar.xz
+            python-linux-x86_64.tar.xz.sha256
+
+      - name: Upload R-Portable Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-portable-linux-x86_64
+          path: |
+            r-portable-linux-x86_64.tar.xz
+            r-portable-linux-x86_64.tar.xz.sha256
+
+  build-darwin-arm64:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout cauldron-go requirements (canonical source, avoids drift)
+        uses: actions/checkout@v4
+        with:
+          repository: noatgnu/cauldron-go
+          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          sparse-checkout: |
+            scripts/requirements.txt
+            scripts/r_requirements.txt
+            backend/scripts/r/install_packages.R
+          sparse-checkout-cone-mode: false
+          path: cauldron-go-src
+
+      - name: Set up dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install --cask xquartz
+          brew install gfortran pkg-config libpng jpeg xz pcre2 curl harfbuzz fribidi libx11 libxext libxrender libxtst cairo tcl-tk hdf5 c-blosc hiredis open-mpi lzo bzip2
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Set up PATH
+        run: |
+          echo "$(brew --prefix gcc)/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/jpeg/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/open-mpi/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix hdf5)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix lzo)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix c-blosc)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix bzip2)/bin" >> $GITHUB_PATH
+
+      - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
+        run: |
+          ASSET_URL=$(curl -fsSL https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("macos-arm64")) | .browser_download_url')
+          curl -fsSL -o cooker "$ASSET_URL"
+          chmod +x cooker
+          R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
+          mkdir -p "${{ github.workspace }}/bin/darwin"
+          COOKER_INSTALL_DIR="${{ github.workspace }}/bin/darwin" ./cooker r install "$R_VERSION"
+          mv "${{ github.workspace }}/bin/darwin/$R_VERSION" "${{ github.workspace }}/bin/darwin/R-Portable"
+
+      - name: Strip R binaries
+        run: |
+          find ${{ github.workspace }}/bin/darwin/R-Portable -type f \( -name "*.so" -o -name "*.dylib" -o -perm +111 \) -exec strip {} \;
+
+      - name: Clean up R installation
+        run: |
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/doc
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/tests
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/share/doc
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/share/info
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/share/man
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/doc
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/html
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/help
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/examples
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/demo
+          rm -rf ${{ github.workspace }}/bin/darwin/R-Portable/library/*/tests
+
+      - name: Set up writable permissions for R library
+        run: |
+          chmod -R 777 ${{ github.workspace }}/bin/darwin/R-Portable
+
+      - name: Set up R R_LIBS_USER
+        run: |
+          echo "R_LIBS_USER=${{ github.workspace }}/bin/darwin/R-Portable/lib" >> $GITHUB_ENV
+
+      - name: Install R packages
+        env:
+          CPPFLAGS: -I/opt/homebrew/include -I/opt/X11/include -I/opt/homebrew/opt/jpeg/include -I/opt/homebrew/include
+          LDFLAGS: -L/opt/X11/lib -L/opt/homebrew/opt/jpeg/lib -L/opt/homebrew/opt/lzo/lib -L/opt/homebrew/lib
+          LZO_DIR: $(brew --prefix lzo)
+          BZIP2_DIR: $(brew --prefix bzip2)
+          BLOSC_DIR: $(brew --prefix c-blosc)
+          HDF5_DIR: $(brew --prefix hdf5)
+          CFLAGS: -I/opt/homebrew/opt/lzo/include
+          TCL_LIBRARY: /opt/homebrew/opt/tcl-tk/lib
+          TK_LIBRARY: /opt/homebrew/opt/tcl-tk/lib
+          PKG_CONFIG_PATH: /opt/homebrew/opt/jpeg/lib/pkgconfig
+          C_INCLUDE_PATH: /opt/homebrew/Cellar/lzo/2.10/include/lzo:/opt/homebrew/Cellar/lzo/2.10/include/
+          LIBRARY_PATH: /opt/homebrew/lib
+        run: |
+          cd cauldron-go-src
+          ${{ github.workspace }}/bin/darwin/R-Portable/bin/Rscript backend/scripts/r/install_packages.R
+
+      - name: Download Portable Python
+        run: |
+          curl -LO https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-aarch64-apple-darwin-install_only.tar.gz
+
+      - name: Extract Python
+        run: |
+          tar -xzf cpython-3.11.10+20241016-aarch64-apple-darwin-install_only.tar.gz -C bin/darwin --no-same-owner --no-same-permissions
+
+      - name: Install Python Packages
+        env:
+          CPPFLAGS: -I/opt/homebrew/include -I/opt/X11/include -I/opt/homebrew/opt/jpeg/include -I/opt/homebrew/include
+          LDFLAGS: -L/opt/X11/lib -L/opt/homebrew/opt/jpeg/lib -L/opt/homebrew/opt/lzo/lib -L/opt/homebrew/lib
+          LZO_DIR: /opt/homebrew/opt/lzo
+          CFLAGS: -I/opt/homebrew/opt/lzo/include
+          TCL_LIBRARY: /opt/homebrew/opt/tcl-tk/lib
+          TK_LIBRARY: /opt/homebrew/opt/tcl-tk/lib
+          PKG_CONFIG_PATH: /opt/homebrew/opt/jpeg/lib/pkgconfig
+          HDF5_DIR: /opt/homebrew/opt/hdf5
+          BLOSC_DIR: /opt/homebrew/opt/c-blosc
+          C_INCLUDE_PATH: /opt/homebrew/Cellar/lzo/2.10/include/lzo:/opt/homebrew/Cellar/lzo/2.10/include/
+          LIBRARY_PATH: /opt/homebrew/lib
+          R_HOME: ${{ github.workspace }}/bin/darwin/R-Portable
+        run: |
+          ${{ github.workspace }}/bin/darwin/python/bin/python3 -m pip install --upgrade pip
+          ${{ github.workspace }}/bin/darwin/python/bin/python3 -m pip install -r cauldron-go-src/scripts/requirements.txt
+
+      - name: Compress Python directory
+        run: XZ_OPT=-9 tar -cJf python-darwin-arm64.tar.xz bin/darwin/python
+
+      - name: Generate Python checksum
+        run: shasum -a 256 python-darwin-arm64.tar.xz > python-darwin-arm64.tar.xz.sha256
+
+      - name: Compress R-Portable directory
+        run: XZ_OPT=-9 tar -cJf r-portable-darwin-arm64.tar.xz bin/darwin/R-Portable
+
+      - name: Generate R-Portable checksum
+        run: shasum -a 256 r-portable-darwin-arm64.tar.xz > r-portable-darwin-arm64.tar.xz.sha256
+
+      - name: Upload Python Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-darwin-arm64
+          path: |
+            python-darwin-arm64.tar.xz
+            python-darwin-arm64.tar.xz.sha256
+
+      - name: Upload R-Portable Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-portable-darwin-arm64
+          path: |
+            r-portable-darwin-arm64.tar.xz
+            r-portable-darwin-arm64.tar.xz.sha256
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout cauldron-go requirements (canonical source, avoids drift)
+        uses: actions/checkout@v4
+        with:
+          repository: noatgnu/cauldron-go
+          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          sparse-checkout: |
+            scripts/requirements.txt
+            scripts/r_requirements.txt
+            backend/scripts/r/install_packages.R
+          sparse-checkout-cone-mode: false
+          path: cauldron-go-src
+
+      - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/noatgnu/cookeR/releases/latest"
+          $assetUrl = ($release.assets | Where-Object { $_.name -like "*windows-x86_64.exe" }).browser_download_url
+          Invoke-WebRequest -Uri $assetUrl -OutFile cooker.exe
+          $available = & .\cooker.exe r list --available --json | ConvertFrom-Json
+          $rVersion = $available[0].version
+          New-Item -ItemType Directory -Force -Path bin/win | Out-Null
+          $env:COOKER_INSTALL_DIR = "${{ github.workspace }}/bin/win"
+          & .\cooker.exe r install $rVersion
+          Move-Item -Path "bin/win/$rVersion" -Destination "bin/win/R-Portable"
+
+      - name: Clean up R installation
+        shell: pwsh
+        run: |
+          $R_PORTABLE_PATH = "${{ github.workspace }}/bin/win/R-Portable"
+          Remove-Item -Path "$R_PORTABLE_PATH/doc" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/share/doc" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/share/info" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/share/man" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/src" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/tests" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/translations" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/po" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/help" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/doc" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/html" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/CITATION" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/NEWS" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/library/*/CHANGE*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$R_PORTABLE_PATH/share/texmf" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem -Path "$R_PORTABLE_PATH/library" -Directory | ForEach-Object {
+              Remove-Item -Path "$($_.FullName)/examples" -Recurse -Force -ErrorAction SilentlyContinue
+              Remove-Item -Path "$($_.FullName)/tests" -Recurse -Force -ErrorAction SilentlyContinue
+              Remove-Item -Path "$($_.FullName)/demo" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Install R packages
+        shell: pwsh
+        env:
+          R_LIBS_USER: ${{ github.workspace }}/bin/win/R-Portable/library
+        run: |
+          Push-Location cauldron-go-src
+          & "${{ github.workspace }}/bin/win/R-Portable/bin/Rscript.exe" backend/scripts/r/install_packages.R
+          Pop-Location
+
+      - name: Download Portable Python 3.11
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-pc-windows-msvc-shared-install_only.tar.gz -OutFile python-standalone.tar.gz
+          New-Item -ItemType Directory -Force -Path bin/win/python
+          tar -xzf python-standalone.tar.gz -C bin/win
+
+      - name: Install Python packages
+        shell: pwsh
+        env:
+          R_HOME: ${{ github.workspace }}/bin/win/R-Portable
+        run: |
+          & "${{ github.workspace }}/bin/win/python/python.exe" -m pip install --upgrade pip
+          & "${{ github.workspace }}/bin/win/python/python.exe" -m pip install -r cauldron-go-src/scripts/requirements.txt
+
+      - name: Compress Python directory
+        shell: pwsh
+        run: tar -cJf python-win-x86_64.tar.xz bin/win/python
+        env:
+          XZ_OPT: -9
+
+      - name: Generate Python checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash python-win-x86_64.tar.xz -Algorithm SHA256).Hash.ToLower()
+          "$hash  python-win-x86_64.tar.xz" | Out-File -FilePath python-win-x86_64.tar.xz.sha256 -Encoding ASCII -NoNewline
+
+      - name: Compress R-Portable directory
+        shell: pwsh
+        run: tar -cJf r-portable-win-x86_64.tar.xz bin/win/R-Portable
+        env:
+          XZ_OPT: -9
+
+      - name: Generate R-Portable checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash r-portable-win-x86_64.tar.xz -Algorithm SHA256).Hash.ToLower()
+          "$hash  r-portable-win-x86_64.tar.xz" | Out-File -FilePath r-portable-win-x86_64.tar.xz.sha256 -Encoding ASCII -NoNewline
+
+      - name: Upload Python Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-win-x86_64
+          path: |
+            python-win-x86_64.tar.xz
+            python-win-x86_64.tar.xz.sha256
+
+      - name: Upload R-Portable Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-portable-win-x86_64
+          path: |
+            r-portable-win-x86_64.tar.xz
+            r-portable-win-x86_64.tar.xz.sha256
+
+  create-release:
+    needs: [prepare, build-linux, build-darwin-arm64, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          files: dist/*
