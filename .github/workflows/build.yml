@@ -6,7 +6,7 @@ on:
       cauldron_go_ref:
         description: 'cauldron-go ref/tag to source requirements.txt/r_requirements.txt/install_packages.R from'
         required: false
-        default: 'main'
+        default: 'master'
   schedule:
     - cron: '0 6 1 * *'
 
@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: noatgnu/cauldron-go
-          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          ref: ${{ inputs.cauldron_go_ref || 'master' }}
           sparse-checkout: |
             scripts/requirements.txt
             scripts/r_requirements.txt
@@ -178,7 +178,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: noatgnu/cauldron-go
-          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          ref: ${{ inputs.cauldron_go_ref || 'master' }}
           sparse-checkout: |
             scripts/requirements.txt
             scripts/r_requirements.txt
@@ -325,7 +325,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: noatgnu/cauldron-go
-          ref: ${{ inputs.cauldron_go_ref || 'main' }}
+          ref: ${{ inputs.cauldron_go_ref || 'master' }}
           sparse-checkout: |
             scripts/requirements.txt
             scripts/r_requirements.txt
