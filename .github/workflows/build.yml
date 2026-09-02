@@ -15,11 +15,25 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      cooker_windows_asset_url: ${{ steps.cooker.outputs.windows_asset_url }}
+      cooker_linux_asset_url: ${{ steps.cooker.outputs.linux_asset_url }}
+      cooker_darwin_asset_url: ${{ steps.cooker.outputs.darwin_asset_url }}
     steps:
       - id: tag
         run: echo "tag=env-$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve all 3 platforms' cooker asset URLs from one API call, shared by every build job
+        id: cooker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COOKER_JSON=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/noatgnu/cookeR/releases/latest)
+          echo "windows_asset_url=$(echo "$COOKER_JSON" | jq -r '.assets[] | select(.name | endswith("windows-x86_64.exe")) | .browser_download_url')" >> "$GITHUB_OUTPUT"
+          echo "linux_asset_url=$(echo "$COOKER_JSON" | jq -r '.assets[] | select(.name | endswith("linux-x86_64")) | .browser_download_url')" >> "$GITHUB_OUTPUT"
+          echo "darwin_asset_url=$(echo "$COOKER_JSON" | jq -r '.assets[] | select(.name | endswith("macos-arm64")) | .browser_download_url')" >> "$GITHUB_OUTPUT"
+
   build-linux:
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -67,11 +81,8 @@ jobs:
             bzip2
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("linux-x86_64")) | .browser_download_url')
-          curl -fsSL -o cooker "$ASSET_URL"
+          curl -fsSL -o cooker "${{ needs.prepare.outputs.cooker_linux_asset_url }}"
           chmod +x cooker
           R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
           mkdir -p "${{ github.workspace }}/bin/linux"
@@ -171,6 +182,7 @@ jobs:
             r-portable-linux-x86_64.tar.xz.sha256
 
   build-darwin-arm64:
+    needs: [prepare]
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -210,11 +222,8 @@ jobs:
           echo "$(brew --prefix bzip2)/bin" >> $GITHUB_PATH
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/noatgnu/cookeR/releases/latest | jq -r '.assets[] | select(.name | endswith("macos-arm64")) | .browser_download_url')
-          curl -fsSL -o cooker "$ASSET_URL"
+          curl -fsSL -o cooker "${{ needs.prepare.outputs.cooker_darwin_asset_url }}"
           chmod +x cooker
           R_VERSION=$(./cooker r list --available --json | jq -r '.[0].version')
           mkdir -p "${{ github.workspace }}/bin/darwin"
@@ -320,6 +329,7 @@ jobs:
             r-portable-darwin-arm64.tar.xz.sha256
 
   build-windows:
+    needs: [prepare]
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -339,12 +349,8 @@ jobs:
 
       - name: Install portable R via cooker (downloads the tested, genuinely relocatable r-portable build)
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/noatgnu/cookeR/releases/latest" -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
-          $assetUrl = ($release.assets | Where-Object { $_.name -like "*windows-x86_64.exe" }).browser_download_url
-          Invoke-WebRequest -Uri $assetUrl -OutFile cooker.exe
+          Invoke-WebRequest -Uri "${{ needs.prepare.outputs.cooker_windows_asset_url }}" -OutFile cooker.exe
           $available = & .\cooker.exe r list --available --json | ConvertFrom-Json
           $rVersion = $available[0].version
           New-Item -ItemType Directory -Force -Path bin/win | Out-Null
